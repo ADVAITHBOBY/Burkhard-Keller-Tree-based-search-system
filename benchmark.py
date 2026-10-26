@@ -1,5 +1,6 @@
 """Compare BK-Tree search against a brute-force scan of the whole dictionary."""
 
+import argparse
 import random
 import time
 
@@ -23,10 +24,16 @@ def mutate(word: str) -> str:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="BK-Tree vs brute-force timing")
+    parser.add_argument("-q", "--queries", type=int, default=100, help="number of test queries (default 100)")
+    parser.add_argument("-w", "--words", default=WORDS_FILE, help="dictionary file")
+    args = parser.parse_args()
+
     random.seed(1)
-    tree = BKTree.from_file(WORDS_FILE)
+    tree = BKTree.from_file(args.words)
     words = list(tree)
-    queries = [mutate(random.choice(words)) for _ in range(500)]
+    queries = [mutate(random.choice(words)) for _ in range(args.queries)]
+    print(f"{len(words)} words, {len(queries)} queries with one random typo each\n")
 
     for n in (1, 2, 3):
         t0 = time.perf_counter()
