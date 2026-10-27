@@ -18,3 +18,4 @@ Insert and search are counted in distance computations, each costing O(L²).
 **Run:** `python main.py`, then type a word. Commands: `:d 1` set distance, `:add word`, `:help`, `:quit`.
 **Test:** `python -m pip install -r requirements.txt`, then `python -m pytest -v`.
 **Files:** `bktree/` (tree + distance), `main.py`, `benchmark.py`, `data/words.txt`, `tests/`.
+<img width="794" height="197" alt="image" src="https://github.com/user-attachments/assets/210c6838-db79-492d-9411-377dc3498d03" />
