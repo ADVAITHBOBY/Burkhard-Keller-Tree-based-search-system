@@ -2,111 +2,146 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from bktree import BKTree
-from main import add_word, load_tree
+from main import DEFAULT_WORDS, add_word, interactive, load_tree, parse_distance
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def run_cli(*args, input_text=None):
-    return subprocess.run(
-        [sys.executable, str(ROOT / "main.py"), *args],
-        capture_output=True,
-        text=True,
-        cwd=ROOT,
-        input=input_text,
-        timeout=60,
-    )
+@pytest.fixture
+def session(monkeypatch, capsys, tmp_path):
+    """Run the interactive loop with scripted input and return what it printed.
+    Added words go to a temporary file, never to the real data folder."""
+    custom = tmp_path / "custom.txt"
+
+    def run(lines, distance=2):
+        feed = iter(lines)
+
+        def fake_input(prompt=""):
+            print(prompt, end="")
+            try:
+                return next(feed)
+            except StopIteration:
+                raise EOFError
+
+        monkeypatch.setattr("builtins.input", fake_input)
+        tree = load_tree(DEFAULT_WORDS, custom)
+        interactive(tree, distance, 10, custom)
+        return capsys.readouterr().out
+
+    run.custom = custom
+    return run
 
 
-# ------------------------------------------------------------- one-off queries
-def test_cli_finds_correction(tmp_path):
-    proc = run_cli("helo", "-d", "1", "-n", "50", "-c", str(tmp_path / "c.txt"))
-    assert proc.returncode == 0
-    assert "hello" in proc.stdout
+# ---------------------------------------------------------------- searching
+def test_finds_correction(session):
+    out = session(["helo", "n"], distance=1)
+    assert "hello" in out
 
 
-def test_cli_no_match(tmp_path):
-    proc = run_cli("qqqqqqqq", "-d", "1", "-c", str(tmp_path / "c.txt"))
-    assert proc.returncode == 0
-    assert "no similar words found" in proc.stdout
+def test_no_similar_words(session):
+    out = session(["qqqqqqqq", "n"], distance=1)
+    assert "no similar words found" in out
 
 
-def test_cli_distance_option_changes_results(tmp_path):
-    custom = str(tmp_path / "c.txt")
-    narrow = run_cli("helo", "-d", "0", "-c", custom).stdout
-    wide = run_cli("helo", "-d", "2", "-n", "100", "-c", custom).stdout
-    assert "no similar words found" in narrow
-    assert "distance 2" in wide
+def test_distance_zero_only_exact(session):
+    out = session(["helo", "n"], distance=0)
+    assert "no similar words found" in out
+    assert "Status: NOT in the dictionary" in out
 
 
-def test_cli_rejects_negative_distance(tmp_path):
-    proc = run_cli("helo", "-d", "-1", "-c", str(tmp_path / "c.txt"))
-    assert proc.returncode != 0
-    assert "cannot be negative" in proc.stderr
+def test_rejects_multiple_words(session):
+    out = session(["hello world", ":quit"])
+    assert "one word at a time" in out
 
 
-def test_cli_add_flag_saves_word(tmp_path):
-    custom = tmp_path / "c.txt"
-    proc = run_cli("flibbertigibbet", "--add", "-c", str(custom))
-    assert proc.returncode == 0
-    assert "Added 'flibbertigibbet'" in proc.stdout
-    assert custom.read_text().split() == ["flibbertigibbet"]
+def test_blank_lines_are_ignored(session):
+    out = session(["", "   ", ":quit"])
+    assert "Query:" not in out
 
 
-# ------------------------------------------------------------ interactive mode
-def test_interactive_change_distance(tmp_path):
-    proc = run_cli("-c", str(tmp_path / "c.txt"), input_text=":d 1\nhelo\nn\n:quit\n")
-    assert "Max distance set to 1" in proc.stdout
-    assert "[d=1]>" in proc.stdout
-    assert "max distance 1" in proc.stdout
+# ----------------------------------------------------- dictionary status line
+def test_status_found_for_dictionary_word(session):
+    out = session(["hello", ":quit"], distance=1)
+    assert "Status: found in the dictionary" in out
+    assert "NOT in the dictionary" not in out
 
 
-def test_interactive_bad_distance_is_rejected(tmp_path):
-    proc = run_cli("-c", str(tmp_path / "c.txt"), input_text=":d abc\n:d -3\n:quit\n")
-    assert proc.stdout.count("Example:  :d 2") == 2
-    assert "[d=2]>" in proc.stdout  # unchanged
+def test_status_not_found_for_misspelling(session):
+    out = session(["helo", "n"], distance=1)
+    assert "Status: NOT in the dictionary" in out
 
 
-def test_interactive_add_typed_word_and_find_it_next_run(tmp_path):
-    custom = tmp_path / "c.txt"
-    proc = run_cli("-c", str(custom), input_text="zzyzxville\ny\n:quit\n")
-    assert "Add 'zzyzxville' to the dictionary?" in proc.stdout
-    assert "Added 'zzyzxville'" in proc.stdout
-    assert custom.read_text().split() == ["zzyzxville"]
-
-    # A fresh run loads the saved word.
-    again = run_cli("zzyzxvile", "-d", "1", "-c", str(custom))
-    assert "zzyzxville" in again.stdout
+def test_status_is_case_insensitive(session):
+    out = session(["HELLO", ":quit"], distance=0)
+    assert "Status: found in the dictionary" in out
 
 
-def test_interactive_decline_add(tmp_path):
-    custom = tmp_path / "c.txt"
-    proc = run_cli("-c", str(custom), input_text="zzyzxville\nn\n:quit\n")
-    assert "Added" not in proc.stdout
-    assert not custom.exists()
+# ------------------------------------------------------------- :d command
+def test_change_distance(session):
+    out = session([":d 1", "helo", "n"])
+    assert "Max distance set to 1" in out
+    assert "[d=1]>" in out
+    assert "max distance 1" in out
 
 
-def test_interactive_no_prompt_for_existing_word(tmp_path):
-    proc = run_cli("-c", str(tmp_path / "c.txt"), input_text="hello\n:quit\n")
-    assert "Add '" not in proc.stdout
+def test_bad_distance_is_rejected(session):
+    out = session([":d abc", ":d -3", ":quit"])
+    assert out.count("Example:  :d 2") == 2
+    assert "[d=2]>" in out  # unchanged
+    assert "[d=-3]" not in out
 
 
-def test_interactive_add_command_and_help(tmp_path):
-    custom = tmp_path / "c.txt"
-    proc = run_cli("-c", str(custom), input_text=":add pythonista\n:add two words\n:help\n:bogus\n:quit\n")
-    assert "Added 'pythonista'" in proc.stdout
-    assert "letters only" in proc.stdout
-    assert "Commands:" in proc.stdout
-    assert "Unknown command ':bogus'" in proc.stdout
+def test_parse_distance():
+    assert parse_distance("3") == 3
+    assert parse_distance("0") == 0
+    with pytest.raises(ValueError):
+        parse_distance("-1")
+    with pytest.raises(ValueError):
+        parse_distance("two")
 
 
-def test_interactive_rejects_multiple_words(tmp_path):
-    proc = run_cli("-c", str(tmp_path / "c.txt"), input_text="hello world\n:quit\n")
-    assert "one word at a time" in proc.stdout
+# ------------------------------------------------------ adding words
+def test_add_typed_word_and_find_it_later(session):
+    out = session(["zzyzxville", "y", "zzyzxville", ":quit"])
+    assert "Add 'zzyzxville' to the dictionary?" in out
+    assert "Added 'zzyzxville'" in out
+    assert "Status: found in the dictionary" in out  # second search
+    assert session.custom.read_text().split() == ["zzyzxville"]
+
+    # A fresh session (new tree) still knows the word.
+    later = session(["zzyzxvile", ":quit"], distance=1)
+    assert "zzyzxville" in later
 
 
-# -------------------------------------------------------------- helper functions
+def test_decline_add(session):
+    out = session(["zzyzxville", "n", ":quit"])
+    assert "Added" not in out
+    assert not session.custom.exists()
+
+
+def test_no_prompt_for_existing_word(session):
+    out = session(["hello", ":quit"])
+    assert "Add '" not in out
+
+
+def test_add_command_help_and_unknown(session):
+    out = session([":add pythonista", ":add two words", ":help", ":bogus", ":quit"])
+    assert "Added 'pythonista'" in out
+    assert "letters only" in out
+    assert "Commands:" in out
+    assert "Unknown command ':bogus'" in out
+
+
+def test_quit_aliases(session):
+    for word in (":q", ":quit", ":exit"):
+        out = session(["hello", word, "this line is never read"])
+        assert "this line is never read" not in out
+
+
+# --------------------------------------------------------- helper functions
 def test_add_word_function(tmp_path):
     tree = BKTree(["apple"])
     custom = tmp_path / "sub" / "c.txt"
@@ -134,30 +169,16 @@ def test_load_tree_merges_custom_words(tmp_path):
     assert len(load_tree(base, tmp_path / "missing.txt")) == 2
 
 
-# ------------------------------------------------------ dictionary status line
-def test_status_found_for_dictionary_word(tmp_path):
-    proc = run_cli("hello", "-d", "1", "-c", str(tmp_path / "c.txt"))
-    assert "Status: found in the dictionary" in proc.stdout
-    assert "NOT in the dictionary" not in proc.stdout
-
-
-def test_status_not_found_for_misspelling(tmp_path):
-    proc = run_cli("helo", "-d", "1", "-c", str(tmp_path / "c.txt"))
-    assert "Status: NOT in the dictionary" in proc.stdout
-
-
-def test_status_is_case_insensitive(tmp_path):
-    proc = run_cli("HELLO", "-d", "0", "-c", str(tmp_path / "c.txt"))
-    assert "Status: found in the dictionary" in proc.stdout
-
-
-def test_status_works_with_distance_zero(tmp_path):
-    proc = run_cli("helo", "-d", "0", "-c", str(tmp_path / "c.txt"))
-    assert "Status: NOT in the dictionary" in proc.stdout
-    assert "no similar words found" in proc.stdout
-
-
-def test_status_changes_after_adding_word(tmp_path):
-    proc = run_cli("-c", str(tmp_path / "c.txt"), input_text="zzyzxville\ny\nzzyzxville\n:quit\n")
-    assert "Status: NOT in the dictionary" in proc.stdout
+# ------------------------------------------------- real program, end to end
+def test_program_starts_and_searches():
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "main.py")],
+        input="hello\n:quit\n",
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        timeout=60,
+    )
+    assert proc.returncode == 0
+    assert "Loaded 1500 words" in proc.stdout
     assert "Status: found in the dictionary" in proc.stdout
